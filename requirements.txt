@@ -1,0 +1,2 @@
+wget==3.2
+soundcloud==0.5.0
