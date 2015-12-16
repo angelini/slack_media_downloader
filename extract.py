@@ -8,6 +8,7 @@ import soundcloud
 import subprocess
 import wget
 
+from mutagen import easyid3
 from requests.exceptions import HTTPError
 from subprocess import CalledProcessError
 
@@ -82,24 +83,38 @@ def filter_for_key(events, key):
 
 
 def extract_tracks(users, event):
+    def clean(string):
+        return string.replace('&amp;', '&')
+
     supported_attachments = [attachment
                              for attachment in event['attachments']
                              if attachment.get('service_name') in ('SoundCloud', 'YouTube')
                              and 'title' in attachment]
 
-    return [{'date': event['date'],
-             'user_name': users[event['user']]['name'],
-             'service_name': attachement['service_name'],
-             'track_url': attachement['from_url'],
-             'track_name': attachement['title'],
-             'artist_url': attachement.get('author_link'),
-             'artist_name': attachement.get('author_name')}
-            for attachement in supported_attachments]
+    tracks = []
+    for attachment in supported_attachments:
+        track = {'date': event['date'],
+                 'user_name': users[event['user']]['name'],
+                 'service_name': attachment['service_name'],
+                 'track_url': clean(attachment['from_url']),
+                 'track_name': clean(attachment['title']),
+                 'artist_url': clean(attachment.get('author_link', '')),
+                 'artist_name': clean(attachment.get('author_name', ''))}
+
+        if track['artist_name'] and track['artist_name'] in track['track_name']:
+            artist = re.escape(track['artist_name'])
+            track['track_name'] = re.sub('\s*by\s*' + artist + '\s*', '', track['track_name'])
+            track['track_name'] = re.sub('\s*&*' + artist + '&*\s*', '', track['track_name'])
+
+        tracks.append(track)
+
+    return tracks
 
 
 def download_from_soundcloud(client, track_url, filename):
     if opath.exists(filename):
-        return 'Already exists: ' + filename
+        print('  Already exists: ' + filename)
+        return False
 
     try:
         track = client.get('/resolve', url=track_url)
@@ -109,27 +124,38 @@ def download_from_soundcloud(client, track_url, filename):
             url = stream_url.location
             wget.download(url, filename)
             print('')
-        return filename
+        return True
 
     except HTTPError as e:
-        return e.response.text
+        print('  SoundCloud download error: ' + e.response.text)
+        return False
 
 
 def download_from_youtube(track_url, filename):
     if opath.exists(filename):
-        return 'Already exists: ' + filename
+        print('  Already exists: ' + filename)
+        return False
 
     try:
-        name = filename.replace('.mp3', '.%(ext)s')
-        command = 'youtube-dl -x --audio-format mp3 --audio-quality 9 -o "{name}" "{url}"' \
-                  .format(name=name,
+        filename = filename.replace('.mp3', '.%(ext)s')
+        command = 'youtube-dl -x --audio-format mp3 --audio-quality 0 -o "{name}" "{url}"' \
+                  .format(name=filename,
                           url=track_url)
 
-        subprocess.check_output(command, shell=True)
-        return filename
+        response = subprocess.check_output(command, shell=True).decode('utf-8')
+        print('\n'.join(['  ' + row for row in response.split('\n')]))
+        return True
 
     except CalledProcessError as e:
-        return 'YouTube download error: ' + str(e.returncode)
+        print('  YouTube download error: ' + str(e.returncode))
+
+
+def add_meta(track_name, artist_name, filename):
+    tag = easyid3.EasyID3()
+    tag['title'] = track_name
+    tag['artist'] = artist_name
+    tag['album'] = 'beats on deck'
+    tag.save(filename)
 
 
 if __name__ == '__main__':
@@ -152,9 +178,12 @@ if __name__ == '__main__':
         filename = gen_filename(channel, track)
         os.makedirs(opath.dirname(filename), exist_ok=True)
 
+        print('{} - {}'.format(track['track_url'], filename))
+
         if track['service_name'] == 'YouTube':
             result = download_from_youtube(track['track_url'], filename)
         elif track['service_name'] == 'SoundCloud':
             result = download_from_soundcloud(sc_client, track['track_url'], filename)
 
-        print('{} - {}'.format(track['track_url'], result))
+        if result:
+            add_meta(track['track_name'], track['artist_name'], filename)
