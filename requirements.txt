@@ -1,3 +1,4 @@
 wget==3.2
 soundcloud==0.5.0
 youtube-dl==2015.12.13
+simplejson==3.8.1

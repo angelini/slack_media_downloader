@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
-import json
+import argparse
 import os
 import os.path as opath
 import re
+import simplejson as json
 import soundcloud
 import subprocess
 import wget
@@ -14,22 +15,16 @@ from subprocess import CalledProcessError
 
 from pprint import pprint  # NOQA
 
-DIR = opath.dirname(opath.realpath(__file__))
-EXPORT = opath.join(DIR, 'export')
-
-WHITESPACE = re.compile('\s')
-NON_ALPHANUMERIC = re.compile('[^A-Za-z0-9_]')
-MANY_UNDERSCORES = re.compile('_+')
-FINAL_UNDERSCORES = re.compile('_+$')
+CLIENT_ID = os.environ.get('CLIENT_ID')
 
 
 def robotize(string):
     if string is None:
         return ''
 
-    string = re.sub(WHITESPACE, '_', string)
-    string = re.sub(NON_ALPHANUMERIC, '', string)
-    string = re.sub(MANY_UNDERSCORES, '_', string)
+    string = re.sub(r'\s', '_', string)
+    string = re.sub(r'[^A-Za-z0-9_]', '', string)
+    string = re.sub(r'_+', '_', string)
 
     return string.lower()
 
@@ -39,8 +34,8 @@ def read_json_file(filename):
         return json.loads(f.read())
 
 
-def read_channel_by_day(channel):
-    folder = opath.join(EXPORT, channel)
+def read_channel_by_day(export_path, channel):
+    folder = opath.join(export_path, channel)
     days = os.listdir(folder)
 
     for day in days:
@@ -50,8 +45,8 @@ def read_channel_by_day(channel):
         yield events
 
 
-def read_users():
-    filename = opath.join(EXPORT, 'users.json')
+def read_users(export_path):
+    filename = opath.join(export_path, 'users.json')
     return {user['id']: user
             for user in read_json_file(filename)}
 
@@ -64,7 +59,7 @@ def track_to_filename(channel, track):
 
 def gen_filename(channel, track):
     def shrink(string, l):
-        return re.sub(FINAL_UNDERSCORES, '', robotize(string)[:l])
+        return re.sub(r'_+$', '', robotize(string)[:l])
 
     date_dirs = opath.join(*track['date'].split('-')[:2])
     basename = '__'.join((
@@ -82,7 +77,7 @@ def filter_for_key(events, key):
             if key in event]
 
 
-def extract_tracks(users, event):
+def extract_tracks_from_event(users, event):
     def clean(string):
         return string.replace('&amp;', '&')
 
@@ -111,6 +106,20 @@ def extract_tracks(users, event):
     return tracks
 
 
+def extract_tracks(export_path, channel):
+    users = read_users(export_path)
+    days = read_channel_by_day(export_path, channel)
+
+    tracks_by_day = [extract_tracks_from_event(users, event)
+                     for day in days
+                     for event in filter_for_key(day, 'attachments')]
+
+    tracks = [track
+              for day in tracks_by_day
+              for track in day]
+    return sorted(tracks, key=lambda track: track['date'])
+
+
 def download_from_soundcloud(client, track_url, filename):
     if opath.exists(filename):
         print('  Already exists: ' + filename)
@@ -124,7 +133,9 @@ def download_from_soundcloud(client, track_url, filename):
             url = stream_url.location
             wget.download(url, filename)
             print('')
-        return True
+            return True
+
+        return False
 
     except HTTPError as e:
         print('  SoundCloud download error: ' + e.response.text)
@@ -150,29 +161,16 @@ def download_from_youtube(track_url, filename):
         print('  YouTube download error: ' + str(e.returncode))
 
 
-def add_meta(track_name, artist_name, filename):
+def add_meta(channel, track_name, artist_name, filename):
     tag = easyid3.EasyID3()
     tag['title'] = track_name
     tag['artist'] = artist_name
-    tag['album'] = 'beats on deck'
+    tag['album'] = channel
     tag.save(filename)
 
 
-if __name__ == '__main__':
-    channel = 'beats-on-deck'
-    users = read_users()
-    days = read_channel_by_day(channel)
-
+def download_tracks(channel, tracks):
     sc_client = soundcloud.Client(client_id=CLIENT_ID)
-
-    tracks_by_day = [extract_tracks(users, event)
-                     for day in days
-                     for event in filter_for_key(day, 'attachments')]
-
-    tracks = [track
-              for day in tracks_by_day
-              for track in day]
-    tracks = sorted(tracks, key=lambda track: track['date'])
 
     for track in tracks:
         filename = gen_filename(channel, track)
@@ -186,4 +184,21 @@ if __name__ == '__main__':
             result = download_from_soundcloud(sc_client, track['track_url'], filename)
 
         if result:
-            add_meta(track['track_name'], track['artist_name'], filename)
+            add_meta(channel, track['track_name'], track['artist_name'], filename)
+
+        print('')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--channel', help='channel to search and backup, default: general', default='general')
+    parser.add_argument('export_path', help='path to the unzipped Slack export')
+    args = parser.parse_args()
+
+    assert CLIENT_ID, 'Ensure CLIENT_ID is set with a SoundCloud client ID'
+
+    tracks = extract_tracks(args.export_path, args.channel)
+    download_tracks(args.channel, tracks)
+
+    print('---------------------------')
+    print('Extracted {} tracks'.format(len(tracks)))
